@@ -49,8 +49,6 @@ python3 scan-integrity-report.py --scan-id <scan_id> --endpoint-id <ep_id>   # s
 | `--all-requests` | With `--show-requests` in text mode, show all endpoint details without prompting between batches (auto-enabled when stdout/stdin are not a TTY) |
 | `--endpoint-id` | Skip full report; show one endpoint |
 
-See [RELEASE-v3.3-customer-notes.md](RELEASE-v3.3-customer-notes.md) for risks, tradeoffs, and upgrade guidance.
-
 ## What the report includes
 
 - **Scan metadata** — target name, URL, status, profile, runtime, who triggered it and how
