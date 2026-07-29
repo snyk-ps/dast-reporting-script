@@ -45,9 +45,10 @@ python3 scan-integrity-report.py --scan-id <scan_id> --endpoint-id <ep_id>   # s
 | `--target-search` | With `--list-targets`, filter by name, URL, or label (API search) |
 | `--api-key` | API key (optional; defaults to `SAW_API_KEY` env var — prefer env var in shared shells) |
 | `--format` | `text` (default) or `json` (including with `--list-targets`) |
-| `--show-requests` | Include parsed HTTP requests per endpoint |
+| `--show-requests` | Include parsed HTTP requests and responses per endpoint |
 | `--all-requests` | With `--show-requests` in text mode, show all endpoint details without prompting between batches (auto-enabled when stdout/stdin are not a TTY) |
 | `--endpoint-id` | Skip full report; show one endpoint |
+| `--unmask-headers` | Show sensitive header values (`Authorization`, `Cookie`, `Set-Cookie`) in full instead of masked as `**********` |
 
 ## What the report includes
 
@@ -57,7 +58,9 @@ python3 scan-integrity-report.py --scan-id <scan_id> --endpoint-id <ep_id>   # s
 - **Rejected endpoints** — reasons (requires *Include deduplicated endpoints* on the target)
 - **Findings** — counts by severity; all severities listed with state (this scan only)
 
-With `--show-requests`, sensitive headers (`Authorization`, auth cookies) are masked as `**********`. In interactive text mode, endpoint details are shown 10 at a time with a prompt to continue; use `--all-requests` for a full dump, or pipe output to auto-continue without prompts.
+With `--show-requests`, each endpoint shows the parsed request **and response** (status, headers, body). Sensitive headers (`Authorization`, `Cookie`, `Set-Cookie`) are masked as `**********` by default in both text and JSON output; pass `--unmask-headers` to see the real values (e.g. for troubleshooting session/auth behavior on your own target). In interactive text mode, endpoint details are shown 10 at a time with a prompt to continue; use `--all-requests` for a full dump, or pipe output to auto-continue without prompts.
+
+Response bodies are shown as a preview (first 500 bytes). The platform generally caps response body capture around 4 KB, though this isn't enforced on every response — the report flags likely truncation when a captured body lands exactly at that cap, and separately when the display preview is shorter than the captured body. Neither note is a guarantee: a body that happens to be exactly 4 KB and complete would still be flagged, and truncation at a different size wouldn't be caught. Use `--format json` for the full captured body. Response data is only available for scans run after the backend added response capture — older scans show "Response: not available."
 
 ## Example
 
@@ -66,7 +69,7 @@ Text output (`--format text`):
 ```
 ================================================================================
                         SCAN INTEGRITY REPORT
-                              v3.3
+                              v4
 ================================================================================
 
 Target name:    Payments API (Production)
@@ -123,7 +126,7 @@ JSON output (`--format json`) includes `script_version`, `target_name`, structur
 
 ```json
 {
-  "script_version": "v3.3",
+  "script_version": "v4",
   "target_name": "Payments API (Production)",
   "target": { "id": "2eJXbYcRLhsQ", "url": "https://api.example.com" },
   "scan": { "id": "M8jvAPmBJUJb", "status": "completed", "scan_profile": { "id": "sp-default", "name": "Full Scan" } },

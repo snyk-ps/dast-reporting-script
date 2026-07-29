@@ -23,7 +23,6 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -31,11 +30,22 @@ from urllib3.util.retry import Retry
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-VERSION = "v3.3"
+VERSION = "v4"
 API_BASE_URL = "https://api.us.probely.com"
 REQUEST_TIMEOUT = 30
 DEFAULT_LIST_LENGTH = 50
 LIST_ALL_WARN_THRESHOLD = 500
+RESPONSE_BODY_PREVIEW_BYTES = 500
+# Confirmed with Probely product (Tiago, 2026-07): response body capture
+# is capped at this size on most responses, though not enforced on every
+# one (observed a full ~8.7KB body captured uncapped) — so an exact match
+# on this value is used as a "likely truncated" signal, not a guarantee.
+RESPONSE_BODY_CAPTURE_CAP_BYTES = 4096
+# Masked by default in both text and JSON output (see redact_endpoint_detail
+# below), per explicit customer request (2026-07) after discussion — not an
+# incidental default. Removing this needs the same conversation, not just
+# a refactor.
+SENSITIVE_HEADER_NAMES = {"authorization", "cookie", "set-cookie"}
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -189,12 +199,45 @@ def fetch_target(client, target_id):
     return client.get(f"/targets/{target_id}/")
 
 
-def fetch_endpoint_detail(client, target_id, scan_id, ep_id):
+def redact_sensitive_headers_b64(header_pairs):
+    if not header_pairs:
+        return header_pairs
+    masked_b64 = base64.b64encode(b"**********").decode("ascii")
+    redacted = []
+    for b64_name, b64_value in header_pairs:
+        name = base64.b64decode(b64_name).decode(
+            "utf-8", errors="replace"
+        )
+        if name.lower() in SENSITIVE_HEADER_NAMES:
+            redacted.append([b64_name, masked_b64])
+        else:
+            redacted.append([b64_name, b64_value])
+    return redacted
+
+
+def redact_endpoint_detail(detail):
+    if not detail:
+        return detail
+    for key in ("parsed_request", "parsed_response"):
+        parsed = detail.get(key)
+        if parsed and parsed.get("headers"):
+            parsed["headers"] = redact_sensitive_headers_b64(
+                parsed["headers"]
+            )
+    return detail
+
+
+def fetch_endpoint_detail(
+    client, target_id, scan_id, ep_id, mask_headers=True
+):
     try:
-        return client.get(
+        detail = client.get(
             f"/targets/{target_id}/scans/{scan_id}"
             f"/endpoints/{ep_id}/"
         )
+        if mask_headers:
+            detail = redact_endpoint_detail(detail)
+        return detail
     except requests.HTTPError as e:
         print(
             f"Warning: failed to fetch endpoint {ep_id}: {e}",
@@ -204,7 +247,8 @@ def fetch_endpoint_detail(client, target_id, scan_id, ep_id):
 
 
 def fetch_endpoint_details_batch(
-    client, target_id, scan_id, endpoints, batch_size=10
+    client, target_id, scan_id, endpoints, batch_size=10,
+    mask_headers=True,
 ):
     details = []
     total = len(endpoints)
@@ -214,7 +258,8 @@ def fetch_endpoint_details_batch(
             ep_id = ep.get("id")
             if ep_id:
                 detail = fetch_endpoint_detail(
-                    client, target_id, scan_id, ep_id
+                    client, target_id, scan_id, ep_id,
+                    mask_headers=mask_headers,
                 )
                 if detail:
                     details.append(detail)
@@ -365,6 +410,19 @@ def truncate_text(text, max_len):
     return text[: max_len - 3] + "..."
 
 
+def decode_headers(header_pairs):
+    decoded = []
+    for b64_name, b64_value in header_pairs or []:
+        name = base64.b64decode(b64_name).decode(
+            "utf-8", errors="replace"
+        )
+        value = base64.b64decode(b64_value).decode(
+            "utf-8", errors="replace"
+        )
+        decoded.append((name, value))
+    return decoded
+
+
 def print_endpoint_detail(detail):
     ep_id = detail.get("id", "?")
     method = detail.get("request_method", "?")
@@ -405,16 +463,61 @@ def print_endpoint_detail(detail):
             f"{path} "
             f"HTTP/{parsed.get('http_version', '?')}"
         )
-        for b64_name, b64_value in parsed.get("headers", []):
-            name = base64.b64decode(b64_name).decode(
-                "utf-8", errors="replace"
-            )
-            value = base64.b64decode(b64_value).decode(
-                "utf-8", errors="replace"
-            )
+        for name, value in decode_headers(parsed.get("headers", [])):
             print(f"    {name}: {value}")
 
+    print_response_detail(detail)
+
     print(f"\n{'─' * 80}\n")
+
+
+def print_response_detail(detail):
+    parsed_response = detail.get("parsed_response")
+    if not parsed_response:
+        print(
+            "\n  Response: not available "
+            "(scan predates response capture)"
+        )
+        return
+
+    status_code = parsed_response.get("status_code", "?")
+    status_message = (parsed_response.get("status_message") or "").strip()
+    http_version = parsed_response.get("http_version", "?")
+
+    print(f"\n  Response:")
+    print(
+        f"    HTTP/{http_version} {status_code} {status_message}".rstrip()
+    )
+    for name, value in decode_headers(parsed_response.get("headers", [])):
+        print(f"    {name}: {value}")
+
+    body_b64 = parsed_response.get("body")
+    if not body_b64:
+        return
+
+    body_bytes = base64.b64decode(body_b64)
+    preview_bytes = body_bytes[:RESPONSE_BODY_PREVIEW_BYTES]
+    preview = preview_bytes.decode("utf-8", errors="replace")
+
+    print(f"\n    Body:")
+    for line in preview.splitlines() or [preview]:
+        print(f"    {line}")
+
+    notes = []
+    if len(body_bytes) == RESPONSE_BODY_CAPTURE_CAP_BYTES:
+        notes.append(
+            f"response body capture hit the platform's "
+            f"{RESPONSE_BODY_CAPTURE_CAP_BYTES}-byte cap; "
+            f"the true response may be larger and truncated"
+        )
+    if len(body_bytes) > RESPONSE_BODY_PREVIEW_BYTES:
+        notes.append(
+            f"showing first {RESPONSE_BODY_PREVIEW_BYTES} of "
+            f"{len(body_bytes)} captured bytes; use --format json "
+            f"for the full body"
+        )
+    for note in notes:
+        print(f"    ({note})")
 
 
 def print_text_report(
@@ -1129,6 +1232,15 @@ def main():
         default=None,
         help="Show detail for a single endpoint",
     )
+    parser.add_argument(
+        "--unmask-headers",
+        action="store_true",
+        help=(
+            "Show sensitive header values (Authorization, Cookie, "
+            "Set-Cookie) in full instead of masked as **********. "
+            "Only affects --show-requests / --endpoint-id output."
+        ),
+    )
     args = parser.parse_args()
 
     if args.target_id and args.target_name:
@@ -1211,7 +1323,8 @@ def main():
     # Single endpoint detail mode
     if args.endpoint_id:
         detail = fetch_endpoint_detail(
-            client, target_id, scan_id, args.endpoint_id
+            client, target_id, scan_id, args.endpoint_id,
+            mask_headers=not args.unmask_headers,
         )
         if detail:
             if args.output_format == "json":
@@ -1238,7 +1351,8 @@ def main():
         if args.show_requests:
             accepted = endpoint_analysis["accepted"]
             endpoint_details = fetch_endpoint_details_batch(
-                client, target_id, scan_id, accepted
+                client, target_id, scan_id, accepted,
+                mask_headers=not args.unmask_headers,
             )
         print_json_report(
             target,
@@ -1287,6 +1401,7 @@ def main():
                             target_id,
                             scan_id,
                             ep_id,
+                            mask_headers=not args.unmask_headers,
                         )
                         if detail:
                             print_endpoint_detail(detail)
