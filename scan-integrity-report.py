@@ -30,21 +30,21 @@ from urllib3.util.retry import Retry
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-VERSION = "v4"
+VERSION = "v4.1"
 API_BASE_URL = "https://api.us.probely.com"
 REQUEST_TIMEOUT = 30
 DEFAULT_LIST_LENGTH = 50
 LIST_ALL_WARN_THRESHOLD = 500
 RESPONSE_BODY_PREVIEW_BYTES = 500
-# Confirmed with Probely product (Tiago, 2026-07): response body capture
-# is capped at this size on most responses, though not enforced on every
-# one (observed a full ~8.7KB body captured uncapped) — so an exact match
-# on this value is used as a "likely truncated" signal, not a guarantee.
+# The platform caps response body capture at this size on most
+# responses, though not consistently enforced (a full ~8.7KB body has
+# been observed captured uncapped) — so an exact match on this value
+# is used as a "likely truncated" signal, not a guarantee.
 RESPONSE_BODY_CAPTURE_CAP_BYTES = 4096
-# Masked by default in both text and JSON output (see redact_endpoint_detail
-# below), per explicit customer request (2026-07) after discussion — not an
-# incidental default. Removing this needs the same conversation, not just
-# a refactor.
+# Masked by default in both text and JSON output (see
+# redact_endpoint_detail below) — a deliberate security default, not
+# an incidental one. Removing it should be its own deliberate change,
+# not a side effect of an unrelated refactor.
 SENSITIVE_HEADER_NAMES = {"authorization", "cookie", "set-cookie"}
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -205,9 +205,18 @@ def redact_sensitive_headers_b64(header_pairs):
     masked_b64 = base64.b64encode(b"**********").decode("ascii")
     redacted = []
     for b64_name, b64_value in header_pairs:
-        name = base64.b64decode(b64_name).decode(
-            "utf-8", errors="replace"
-        )
+        try:
+            name = base64.b64decode(b64_name).decode(
+                "utf-8", errors="replace"
+            )
+        except ValueError:
+            # Header name could not be decoded and cannot be classified.
+            # An undecodable name may indicate a corrupted Authorization
+            # or Cookie header, so it is masked by default: masking an
+            # unidentified header is preferable to leaking a credential
+            # that could not be identified.
+            redacted.append([b64_name, masked_b64])
+            continue
         if name.lower() in SENSITIVE_HEADER_NAMES:
             redacted.append([b64_name, masked_b64])
         else:
@@ -413,14 +422,33 @@ def truncate_text(text, max_len):
 def decode_headers(header_pairs):
     decoded = []
     for b64_name, b64_value in header_pairs or []:
-        name = base64.b64decode(b64_name).decode(
-            "utf-8", errors="replace"
-        )
-        value = base64.b64decode(b64_value).decode(
-            "utf-8", errors="replace"
-        )
+        try:
+            name = base64.b64decode(b64_name).decode(
+                "utf-8", errors="replace"
+            )
+        except ValueError:
+            name = "<undecodable>"
+        try:
+            value = base64.b64decode(b64_value).decode(
+                "utf-8", errors="replace"
+            )
+        except ValueError:
+            value = "<undecodable>"
         decoded.append((name, value))
     return decoded
+
+
+def prepare_endpoint_detail_for_json(detail):
+    if not detail:
+        return detail
+    for key in ("parsed_request", "parsed_response"):
+        parsed = detail.get(key)
+        if parsed and parsed.get("headers"):
+            parsed["headers"] = [
+                {"name": name, "value": value}
+                for name, value in decode_headers(parsed["headers"])
+            ]
+    return detail
 
 
 def print_endpoint_detail(detail):
@@ -790,6 +818,14 @@ def resolve_api_key(cli_api_key):
         )
         sys.exit(1)
     return api_key
+
+
+def resolve_api_base_url(cli_base_url):
+    return (
+        cli_base_url
+        or os.environ.get("SAW_API_BASE_URL")
+        or API_BASE_URL
+    )
 
 
 def find_targets_by_name(targets, target_name):
@@ -1208,6 +1244,14 @@ def main():
         ),
     )
     parser.add_argument(
+        "--api-base-url",
+        default=None,
+        help=(
+            "API base URL (optional; defaults to SAW_API_BASE_URL "
+            f"environment variable, then {API_BASE_URL})"
+        ),
+    )
+    parser.add_argument(
         "--format",
         choices=["text", "json"],
         default="text",
@@ -1283,7 +1327,8 @@ def main():
         sys.exit(1)
 
     api_key = resolve_api_key(args.api_key)
-    client = APIClient(api_key)
+    base_url = resolve_api_base_url(args.api_base_url)
+    client = APIClient(api_key, base_url=base_url)
 
     if args.list_targets:
         run_list_targets(client, args)
@@ -1328,7 +1373,9 @@ def main():
         )
         if detail:
             if args.output_format == "json":
-                print(json.dumps(detail, indent=2))
+                print(json.dumps(
+                    prepare_endpoint_detail_for_json(detail), indent=2
+                ))
             else:
                 print_endpoint_detail(detail)
         else:
@@ -1350,10 +1397,13 @@ def main():
         endpoint_details = None
         if args.show_requests:
             accepted = endpoint_analysis["accepted"]
-            endpoint_details = fetch_endpoint_details_batch(
-                client, target_id, scan_id, accepted,
-                mask_headers=not args.unmask_headers,
-            )
+            endpoint_details = [
+                prepare_endpoint_detail_for_json(detail)
+                for detail in fetch_endpoint_details_batch(
+                    client, target_id, scan_id, accepted,
+                    mask_headers=not args.unmask_headers,
+                )
+            ]
         print_json_report(
             target,
             scan,
