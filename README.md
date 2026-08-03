@@ -13,7 +13,7 @@ export SAW_API_KEY="eyJhbG..."   # from https://plus.probely.app/ → Profile �
 python3 scan-integrity-report.py --scan-id <scan_id>
 ```
 
-Optional: set `API_BASE_URL` at the top of `scan-integrity-report.py` (default: `https://api.us.probely.com`).
+Optional: override the API base URL with `--api-base-url` or the `SAW_API_BASE_URL` environment variable (default: `https://api.us.probely.com`). Useful for pointing at a different tenant/region without editing the script.
 
 **Requirements:** Python 3.9+, `requests`, Snyk API & Web API key.
 
@@ -44,6 +44,7 @@ python3 scan-integrity-report.py --scan-id <scan_id> --endpoint-id <ep_id>   # s
 | `--list-length` | With `--list-targets`, results per page in paginated mode (default: 50; not used with `--list-all`) |
 | `--target-search` | With `--list-targets`, filter by name, URL, or label (API search) |
 | `--api-key` | API key (optional; defaults to `SAW_API_KEY` env var — prefer env var in shared shells) |
+| `--api-base-url` | API base URL (optional; defaults to `SAW_API_BASE_URL` env var, then `https://api.us.probely.com`) |
 | `--format` | `text` (default) or `json` (including with `--list-targets`) |
 | `--show-requests` | Include parsed HTTP requests and responses per endpoint |
 | `--all-requests` | With `--show-requests` in text mode, show all endpoint details without prompting between batches (auto-enabled when stdout/stdin are not a TTY) |
@@ -58,7 +59,7 @@ python3 scan-integrity-report.py --scan-id <scan_id> --endpoint-id <ep_id>   # s
 - **Rejected endpoints** — reasons (requires *Include deduplicated endpoints* on the target)
 - **Findings** — counts by severity; all severities listed with state (this scan only)
 
-With `--show-requests`, each endpoint shows the parsed request **and response** (status, headers, body). Sensitive headers (`Authorization`, `Cookie`, `Set-Cookie`) are masked as `**********` by default in both text and JSON output; pass `--unmask-headers` to see the real values (e.g. for troubleshooting session/auth behavior on your own target). In interactive text mode, endpoint details are shown 10 at a time with a prompt to continue; use `--all-requests` for a full dump, or pipe output to auto-continue without prompts.
+With `--show-requests`, each endpoint shows the parsed request **and response** (status, headers, body). Headers are decoded to readable `name`/`value` pairs in both text and JSON output (JSON previously left them as raw base64 pairs — this was fixed so masking is actually visible in JSON, not just applied invisibly underneath opaque-looking base64). Sensitive headers (`Authorization`, `Cookie`, `Set-Cookie`) are masked as `**********` by default; pass `--unmask-headers` to see the real values (e.g. for troubleshooting session/auth behavior on your own target). In interactive text mode, endpoint details are shown 10 at a time with a prompt to continue; use `--all-requests` for a full dump, or pipe output to auto-continue without prompts.
 
 Response bodies are shown as a preview (first 500 bytes). The platform generally caps response body capture around 4 KB, though this isn't enforced on every response — the report flags likely truncation when a captured body lands exactly at that cap, and separately when the display preview is shorter than the captured body. Neither note is a guarantee: a body that happens to be exactly 4 KB and complete would still be flagged, and truncation at a different size wouldn't be caught. Use `--format json` for the full captured body. Response data is only available for scans run after the backend added response capture — older scans show "Response: not available."
 
@@ -69,7 +70,7 @@ Text output (`--format text`):
 ```
 ================================================================================
                         SCAN INTEGRITY REPORT
-                              v4
+                              v4.1
 ================================================================================
 
 Target name:    Payments API (Production)
@@ -126,7 +127,7 @@ JSON output (`--format json`) includes `script_version`, `target_name`, structur
 
 ```json
 {
-  "script_version": "v4",
+  "script_version": "v4.1",
   "target_name": "Payments API (Production)",
   "target": { "id": "2eJXbYcRLhsQ", "url": "https://api.example.com" },
   "scan": { "id": "M8jvAPmBJUJb", "status": "completed", "scan_profile": { "id": "sp-default", "name": "Full Scan" } },
@@ -135,3 +136,5 @@ JSON output (`--format json`) includes `script_version`, `target_name`, structur
   "findings": { "scope": "scan", "total": 7, "items": { "high": [{ "name": "SQL Injection", "state": "notfixed", ... }] } }
 }
 ```
+
+**Breaking change (v4):** with `--show-requests --format json`, each `endpoint_details` entry's `parsed_request`/`parsed_response.headers` changed shape from `[[base64_name, base64_value], ...]` to decoded `[{"name": ..., "value": ...}, ...]`. If you parse this field programmatically (e.g. in a CI pipeline), update your parser accordingly.
